@@ -12,7 +12,6 @@ local current_count = redis.call("ZCARD", key)
 
 local allowed
 local retry_after = 0
-local no_variable
 
 if current_count < limit then
     local unique_member = now_ms .. "-" .. math.random(1000000)
