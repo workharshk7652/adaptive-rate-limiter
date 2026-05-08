@@ -1,6 +1,7 @@
 package com.ratelimiter.adaptive_rate_limiter.filter;
 
 import com.ratelimiter.adaptive_rate_limiter.config.GatewayProperties;
+import com.ratelimiter.adaptive_rate_limiter.controller.AdminController;
 import com.ratelimiter.adaptive_rate_limiter.model.ClientIdentity;
 import com.ratelimiter.adaptive_rate_limiter.model.GatewayRequest;
 import com.ratelimiter.adaptive_rate_limiter.model.GatewayResponse;
@@ -10,33 +11,24 @@ import com.ratelimiter.adaptive_rate_limiter.ratelimit.RateLimiterFactory;
 import com.ratelimiter.adaptive_rate_limiter.risk.ClientBehaviorTracker;
 import com.ratelimiter.adaptive_rate_limiter.risk.CompositeRiskScorer;
 import com.ratelimiter.adaptive_rate_limiter.risk.RiskScore;
+import com.ratelimiter.adaptive_rate_limiter.shadow.ShadowModeEvaluator;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
 
-/**
- * Now adaptive — uses the risk score to dynamically
- * reduce the effective limit for suspicious clients.
- *
- * Flow:
- *  1. Read clientIdentity from request attribute
- *  2. Record this request in behavior tracker
- *  3. Compute risk score from behavior signals
- *  4. Apply throttle multiplier to base limit
- *  5. Call rate limiter with adjusted limit
- *  6. Allow or block
- */
 @Slf4j
 @Component
 @Order(2)
 @RequiredArgsConstructor
 public class RateLimitFilter implements GatewayFilter {
 
-    private final RateLimiterFactory      rateLimiterFactory;
-    private final GatewayProperties       gatewayProperties;
-    private final CompositeRiskScorer     riskScorer;
-    private final ClientBehaviorTracker   behaviorTracker;
+    private final RateLimiterFactory    rateLimiterFactory;
+    private final GatewayProperties     gatewayProperties;
+    private final CompositeRiskScorer   riskScorer;
+    private final ClientBehaviorTracker behaviorTracker;
+    private final ShadowModeEvaluator   shadowModeEvaluator;
+    private final AdminController       adminController;
 
     @Override
     public GatewayResponse filter(GatewayRequest request) {
@@ -50,13 +42,13 @@ public class RateLimitFilter implements GatewayFilter {
             identity = ClientIdentity.anonymous(request.getRemoteIp());
         }
 
-        // Step 2 — record this request for behavior tracking
+        // Step 2 — record request for behavior tracking
         behaviorTracker.recordRequest(identity.getRateLimitKey());
 
         // Step 3 — compute risk score
         RiskScore riskScore = riskScorer.score(request);
 
-        // Step 4 — build rule with risk-adjusted limit
+        // Step 4 — build adaptive rule
         RateLimitRule rule = buildAdaptiveRule(identity, riskScore);
 
         if (!rule.isEnabled()) {
@@ -78,12 +70,17 @@ public class RateLimitFilter implements GatewayFilter {
                 String.format("%.2f", riskScore.getScore()),
                 String.format("%.2f", riskScore.getThrottleMultiplier()));
 
-        if (result.isAllowed()) {
-            return GatewayResponse.allowed();
-        } else {
-            return GatewayResponse.rateLimitExceeded(
-                    result.getRetryAfterSeconds());
-        }
+        // Step 6 — raw decision
+        GatewayResponse decision = result.isAllowed()
+                ? GatewayResponse.allowed()
+                : GatewayResponse.rateLimitExceeded(
+                result.getRetryAfterSeconds());
+
+        // Store raw decision so ShadowModeFilter can read it globally
+        request.getRawRequest().setAttribute("rateLimitDecision", decision);
+
+        // Step 7 — shadow mode check
+        return shadowModeEvaluator.evaluate(request, decision, rule);
     }
 
     @Override
@@ -91,46 +88,58 @@ public class RateLimitFilter implements GatewayFilter {
         return "RateLimitFilter";
     }
 
-    /**
-     * Builds a RateLimitRule where the limit is adjusted
-     * downward based on the client's risk score.
-     *
-     * Example:
-     *   Base limit   = 60 req/min
-     *   Risk score   = 0.7 (high risk)
-     *   Multiplier   = 0.3
-     *   Effective    = 60 * 0.3 = 18 req/min
-     */
     private RateLimitRule buildAdaptiveRule(ClientIdentity identity,
                                             RiskScore riskScore) {
 
+        // Check if a custom rule exists for this client in Admin API
+        RateLimitRule customRule = adminController
+                .findRuleForClient(identity.getRateLimitKey());
+
+        if (customRule != null) {
+            log.debug("Using custom rule | id={} | shadowMode={} | limit={}/{}s",
+                    customRule.getId(),
+                    customRule.isShadowMode(),
+                    customRule.getRequestsPerWindow(),
+                    customRule.getWindowSizeSeconds());
+
+            // Apply risk score multiplier even to custom rules
+            int effectiveLimit = (int) Math.max(1,
+                    customRule.getRequestsPerWindow()
+                            * riskScore.getThrottleMultiplier());
+
+            return RateLimitRule.builder()
+                    .id(customRule.getId())
+                    .clientKey(identity.getRateLimitKey())
+                    .pathPattern(customRule.getPathPattern())
+                    .requestsPerWindow(effectiveLimit)
+                    .windowSizeSeconds(customRule.getWindowSizeSeconds())
+                    .burstCapacity(riskScore.isHighRisk() ? 0
+                            : customRule.getBurstCapacity())
+                    .algorithm(customRule.getAlgorithm())
+                    .shadowMode(customRule.isShadowMode())  // ← preserved correctly
+                    .enabled(customRule.isEnabled())
+                    .build();
+        }
+
         int baseLimit = switch (identity.getTier()) {
             case FREE     -> gatewayProperties
-                    .getDefaultRules()
-                    .getRequestsPerMinute();
+                    .getDefaultRules().getRequestsPerMinute();
             case STANDARD -> gatewayProperties
-                    .getDefaultRules()
-                    .getRequestsPerMinute() * 5;
+                    .getDefaultRules().getRequestsPerMinute() * 5;
             case PREMIUM  -> gatewayProperties
-                    .getDefaultRules()
-                    .getRequestsPerMinute() * 50;
+                    .getDefaultRules().getRequestsPerMinute() * 50;
         };
 
-        // Apply throttle multiplier from risk score
         int effectiveLimit = (int) Math.max(1,
                 baseLimit * riskScore.getThrottleMultiplier());
 
-        String algorithmStr = gatewayProperties
-                .getDefaultRules().getAlgorithm();
-        RateLimitRule.Algorithm algorithm =
-                RateLimitRule.Algorithm.valueOf(algorithmStr);
+        RateLimitRule.Algorithm algorithm = RateLimitRule.Algorithm.valueOf(
+                gatewayProperties.getDefaultRules().getAlgorithm());
 
         if (riskScore.isMediumRisk() || riskScore.isHighRisk()) {
-            log.info("Adaptive throttle | client={} | base={} | " +
-                            "effective={} | reason={}",
+            log.info("Adaptive throttle | client={} | base={} | effective={} | reason={}",
                     identity.getRateLimitKey(),
-                    baseLimit,
-                    effectiveLimit,
+                    baseLimit, effectiveLimit,
                     riskScore.getReason());
         }
 
@@ -143,6 +152,7 @@ public class RateLimitFilter implements GatewayFilter {
                 .burstCapacity(riskScore.isHighRisk() ? 0
                         : gatewayProperties.getDefaultRules().getBurstCapacity())
                 .algorithm(algorithm)
+                .shadowMode(false)
                 .enabled(true)
                 .build();
     }

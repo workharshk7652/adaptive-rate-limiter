@@ -137,4 +137,22 @@ public class AdminController {
         body.put("timestamp", Instant.now().toString());
         return ResponseEntity.ok(body);
     }
+
+    public RateLimitRule findRuleForClient(String clientKey) {
+        // First try exact match
+        RateLimitRule exact = rules.values().stream()
+                .filter(RateLimitRule::isEnabled)
+                .filter(r -> clientKey.equals(r.getClientKey()))
+                .findFirst()
+                .orElse(null);
+
+        if (exact != null) return exact;
+
+        // Fall back to wildcard
+        return rules.values().stream()
+                .filter(RateLimitRule::isEnabled)
+                .filter(r -> "*".equals(r.getClientKey()))
+                .findFirst()
+                .orElse(null);
+    }
 }
