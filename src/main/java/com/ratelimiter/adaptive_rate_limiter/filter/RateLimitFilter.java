@@ -2,6 +2,7 @@ package com.ratelimiter.adaptive_rate_limiter.filter;
 
 import com.ratelimiter.adaptive_rate_limiter.config.GatewayProperties;
 import com.ratelimiter.adaptive_rate_limiter.controller.AdminController;
+import com.ratelimiter.adaptive_rate_limiter.metrics.RateLimiterMetrics;
 import com.ratelimiter.adaptive_rate_limiter.model.ClientIdentity;
 import com.ratelimiter.adaptive_rate_limiter.model.GatewayRequest;
 import com.ratelimiter.adaptive_rate_limiter.model.GatewayResponse;
@@ -29,6 +30,7 @@ public class RateLimitFilter implements GatewayFilter {
     private final ClientBehaviorTracker behaviorTracker;
     private final ShadowModeEvaluator   shadowModeEvaluator;
     private final AdminController       adminController;
+    private final RateLimiterMetrics    metrics;
 
     @Override
     public GatewayResponse filter(GatewayRequest request) {
@@ -56,9 +58,23 @@ public class RateLimitFilter implements GatewayFilter {
         }
 
         // Step 5 — call the rate limiter
+        // Step 5 — call rate limiter + measure latency
+        long startNs = System.nanoTime();
         RateLimitResult result = rateLimiterFactory
                 .getLimiter(rule)
                 .tryAcquire(identity.getRateLimitKey(), rule);
+        metrics.recordCheckDuration(identity.getRateLimitKey(),
+                System.nanoTime() - startNs);
+
+        // Step 5b — update risk score gauge
+        metrics.updateRiskScore(identity.getRateLimitKey(), riskScore.getScore());
+
+        // Step 5c — record allow/block decision
+        if (result.isAllowed()) {
+            metrics.recordAllowed(identity.getRateLimitKey(), request.getPath());
+        } else {
+            metrics.recordBlocked(identity.getRateLimitKey(), request.getPath());
+        }
 
         log.info("RateLimit | client={} | path={} | allowed={} | " +
                         "remaining={}/{} | riskScore={} | multiplier={}",
@@ -76,11 +92,18 @@ public class RateLimitFilter implements GatewayFilter {
                 : GatewayResponse.rateLimitExceeded(
                 result.getRetryAfterSeconds());
 
-        // Store raw decision so ShadowModeFilter can read it globally
+        // Step 7 — store raw decision
         request.getRawRequest().setAttribute("rateLimitDecision", decision);
 
-        // Step 7 — shadow mode check
-        return shadowModeEvaluator.evaluate(request, decision, rule);
+        // Step 8 — per-rule shadow mode
+        GatewayResponse finalDecision = shadowModeEvaluator.evaluate(request, decision, rule);
+
+        // Step 9 — global shadow mode override
+        if (gatewayProperties.getShadowMode().isEnabled()) {
+            return shadowModeEvaluator.evaluateGlobal(request, finalDecision);
+        }
+
+        return finalDecision;
     }
 
     @Override

@@ -48,8 +48,9 @@ public class FilterChain {
     }
 
     private String resolveClientKey(GatewayRequest request) {
-        if(request.getClientIdentity() != null) {
-            return request.getClientIdentity().getRateLimitKey();
+        Object identity = request.getRawRequest().getAttribute("clientIdentity");
+        if (identity instanceof com.ratelimiter.adaptive_rate_limiter.model.ClientIdentity ci) {
+            return ci.getRateLimitKey();
         }
         return request.getRemoteIp();
     }

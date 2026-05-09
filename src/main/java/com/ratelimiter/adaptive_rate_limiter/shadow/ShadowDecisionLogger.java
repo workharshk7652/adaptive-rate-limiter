@@ -1,10 +1,13 @@
 package com.ratelimiter.adaptive_rate_limiter.shadow;
 
+import com.ratelimiter.adaptive_rate_limiter.metrics.RateLimiterMetrics;
 import com.ratelimiter.adaptive_rate_limiter.model.GatewayRequest;
 import com.ratelimiter.adaptive_rate_limiter.model.GatewayResponse;
 import com.ratelimiter.adaptive_rate_limiter.model.ClientIdentity;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
+import com.ratelimiter.adaptive_rate_limiter.metrics.RateLimiterMetrics;
 
 import java.time.Instant;
 import java.util.LinkedHashMap;
@@ -20,8 +23,10 @@ import java.util.Map;
  */
 @Slf4j
 @Component
+@RequiredArgsConstructor
 public class ShadowDecisionLogger {
 
+    private final RateLimiterMetrics metrics;
     /**
      * Called when a rule would have blocked a request
      * but shadow mode prevented actual enforcement.
@@ -31,7 +36,6 @@ public class ShadowDecisionLogger {
 
         String clientKey = resolveClientKey(request);
 
-        // Structured log — every field on its own key=value
         // Easy to parse with log aggregation tools (ELK, Grafana Loki)
         log.warn("[SHADOW] Would have blocked | " +
                         "client={} | path={} | method={} | " +
@@ -45,6 +49,8 @@ public class ShadowDecisionLogger {
                 wouldHaveBlocked.getBlockedBy(),
                 wouldHaveBlocked.getRetryAfterSeconds(),
                 Instant.now());
+
+        metrics.recordShadowOverride(resolveClientKey(request));
     }
 
     /**

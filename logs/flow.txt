@@ -1,0 +1,599 @@
+
+help me create a proper curl (or a collection of different scenarios of curls) to run and alongside help me in navigating the project so that I can understand the flow in best possible manner.
+
+give me postman commands and not "curl" ones,
+also, importantly, after we get the logs, help me move in project properly step by step so that it increases my understanding
+
+Perfect.
+This is now the BEST phase for learning the project deeply.
+
+You should now stop randomly changing code and instead:
+
+```text id="r7xq00"
+drive the system with scenarios
+→ observe logs
+→ trace code path
+→ understand architecture
+```
+
+That is how backend engineers actually learn distributed systems.
+
+---
+
+# 🎯 Goal
+
+We will do this cycle repeatedly:
+
+```text id="r7xq01"
+Postman Request
+→ Observe Response
+→ Observe Logs
+→ Trace EXACT code flow
+→ Understand WHY it happened
+```
+
+This is the BEST way to internalize the project.
+
+---
+
+# 🔥 STEP 0 — BEFORE EVERYTHING
+
+You need 3 terminals running.
+
+---
+
+# Terminal 1 — Redis
+
+```bash id="r7xq02"
+docker start rl-redis
+```
+
+Check:
+
+```bash id="r7xq03"
+docker ps
+```
+
+---
+
+# Terminal 2 — Spring Boot
+
+Run app from IntelliJ.
+
+OR:
+
+```bash id="r7xq04"
+./mvnw spring-boot:run
+```
+
+---
+
+# Terminal 3 — Downstream server
+
+VERY IMPORTANT.
+
+Create:
+
+```text id="r7xq05"
+test-server/
+ └── v1/
+      └── users
+```
+
+Inside `users`, put:
+
+```text id="r7xq06"
+hello users
+```
+
+Then:
+
+```bash id="r7xq07"
+cd test-server
+python -m http.server 9090
+```
+
+Now downstream works.
+
+---
+
+# 🔥 POSTMAN COLLECTION STRUCTURE
+
+Create collection:
+
+```text id="r7xq08"
+Adaptive Gateway Tests
+```
+
+Inside it create folders:
+
+| Folder          | Purpose             |
+| --------------- | ------------------- |
+| Basic Flow      | normal requests     |
+| Adaptive Risk   | spam requests       |
+| Shadow Mode     | shadow testing      |
+| Admin APIs      | create/delete rules |
+| Failure Testing | downstream failures |
+
+---
+
+# 🚀 SCENARIO 1 — NORMAL REQUEST FLOW
+
+This teaches:
+
+```text id="r7xq09"
+GatewayController
+→ FilterChain
+→ Authentication
+→ RateLimit
+→ Forwarding
+```
+
+---
+
+# POSTMAN REQUEST
+
+## Request name
+
+```text id="r7xq10"
+Normal Request
+```
+
+---
+
+## Method
+
+```text id="r7xq11"
+GET
+```
+
+---
+
+## URL
+
+```text id="r7xq12"
+http://localhost:8080/api/v1/users
+```
+
+---
+
+## Headers
+
+| Key       | Value           |
+| --------- | --------------- |
+| x-api-key | normal-client-1 |
+
+---
+
+# 🎯 EXPECTED RESPONSE
+
+```text id="r7xq13"
+hello users
+```
+
+---
+
+# 🎯 EXPECTED LOG FLOW
+
+Read logs TOP → DOWN.
+
+---
+
+# 1. Gateway entry
+
+```text id="r7xq14"
+Incoming | method=GET | path=/api/v1/users
+```
+
+TRACE TO:
+
+```text id="r7xq15"
+GatewayController.handle()
+```
+
+Understand:
+
+* request enters gateway here
+
+---
+
+# 2. Authentication
+
+```text id="r7xq16"
+Auth | AUTHENTICATED
+```
+
+TRACE TO:
+
+```text id="r7xq17"
+AuthenticationFilter.filter()
+```
+
+Understand:
+
+* api key extracted
+* ClientIdentity created
+* request attribute set
+
+---
+
+# 3. Rate limiting
+
+```text id="r7xq18"
+RateLimit | client=...
+```
+
+TRACE TO:
+
+```text id="r7xq19"
+RateLimitFilter.filter()
+```
+
+Understand:
+
+* behavior tracked
+* risk calculated
+* adaptive rule built
+* limiter called
+
+---
+
+# 4. FilterChain
+
+```text id="r7xq20"
+Request ALLOWED
+```
+
+TRACE TO:
+
+```text id="r7xq21"
+FilterChain.execute()
+```
+
+Understand:
+
+* all filters passed
+
+---
+
+# 5. Downstream forwarding
+
+```text id="r7xq22"
+Forwarding | method=GET
+```
+
+TRACE TO:
+
+```text id="r7xq23"
+GatewayController.forwardToDownstream()
+```
+
+Understand:
+
+* proxying behavior
+* gateway acting like reverse proxy
+
+---
+
+# 🔥 SCENARIO 2 — RISK BUILDUP
+
+This teaches:
+
+```text id="r7xq24"
+Adaptive throttling
+Risk scoring
+Behavior tracking
+Redis sliding windows
+```
+
+---
+
+# POSTMAN REQUEST
+
+Duplicate previous request.
+
+Rename:
+
+```text id="r7xq25"
+Burst Traffic
+```
+
+---
+
+# RUNNER SETTINGS
+
+Use Collection Runner.
+
+| Setting    | Value |
+| ---------- | ----- |
+| Iterations | 25    |
+| Delay      | 0 ms  |
+
+---
+
+# 🎯 EXPECTED LOGS
+
+Initially:
+
+```text id="r7xq26"
+allowed=true
+riskScore=0.03
+```
+
+Later:
+
+```text id="r7xq27"
+MEDIUM RISK
+Adaptive throttle
+```
+
+TRACE:
+
+---
+
+# Understand THIS FLOW
+
+Inside:
+
+```text id="r7xq28"
+RateLimitFilter
+```
+
+follow:
+
+```java id="r7xq29"
+behaviorTracker.recordRequest()
+```
+
+↓
+
+```java id="r7xq30"
+riskScorer.score()
+```
+
+↓
+
+```java id="r7xq31"
+buildAdaptiveRule()
+```
+
+↓
+
+```java id="r7xq32"
+tryAcquire()
+```
+
+This is the CORE adaptive pipeline.
+
+---
+
+# 🔥 SCENARIO 3 — DOWNSTREAM FAILURE
+
+This teaches:
+
+```text id="r7xq33"
+error tracking
+recordError()
+risk escalation
+```
+
+---
+
+# Stop Python server.
+
+Now requests fail.
+
+Run Burst Traffic again.
+
+---
+
+# 🎯 EXPECTED LOGS
+
+```text id="r7xq34"
+Connection refused
+```
+
+then:
+
+```text id="r7xq35"
+MEDIUM RISK
+```
+
+because:
+
+```text id="r7xq36"
+recordError()
+```
+
+increases error rate.
+
+---
+
+# TRACE THIS
+
+Inside:
+
+```text id="r7xq37"
+GatewayController catch block
+```
+
+Find:
+
+```java id="r7xq38"
+behaviorTracker.recordError(...)
+```
+
+Then follow:
+
+```text id="r7xq39"
+ClientBehaviorTracker
+```
+
+Understand:
+
+* Redis sorted sets
+* sliding windows
+* error accumulation
+
+---
+
+# 🔥 SCENARIO 4 — SHADOW MODE
+
+This teaches:
+
+```text id="r7xq40"
+Decision override architecture
+```
+
+---
+
+# POSTMAN REQUEST
+
+## Create Shadow Rule
+
+Method:
+
+```text id="r7xq41"
+POST
+```
+
+URL:
+
+```text id="r7xq42"
+http://localhost:8080/admin/rules
+```
+
+Body → raw JSON:
+
+```json id="r7xq43"
+{
+  "id": "shadow-test",
+  "clientKey": "client:shadow-client-abc",
+  "requestsPerWindow": 3,
+  "windowSizeSeconds": 60,
+  "burstCapacity": 0,
+  "algorithm": "TOKEN_BUCKET",
+  "shadowMode": true,
+  "description": "Shadow testing"
+}
+```
+
+---
+
+# Then run
+
+```text id="r7xq44"
+GET /api/v1/users
+```
+
+with header:
+
+| Key       | Value             |
+| --------- | ----------------- |
+| x-api-key | shadow-client-abc |
+
+Run 10+ times.
+
+---
+
+# 🎯 EXPECTED LOGS
+
+```text id="r7xq45"
+[SHADOW] Would have blocked
+```
+
+and:
+
+```text id="r7xq46"
+Overriding block → allowing
+```
+
+---
+
+# TRACE THIS FLOW
+
+Follow:
+
+```text id="r7xq47"
+RateLimitFilter
+```
+
+↓
+
+```java id="r7xq48"
+GatewayResponse decision
+```
+
+↓
+
+```java id="r7xq49"
+shadowModeEvaluator.evaluate()
+```
+
+↓
+
+```text id="r7xq50"
+ShadowDecisionLogger
+```
+
+This teaches:
+
+* decision interception
+* policy override systems
+* observability patterns
+
+---
+
+# 🔥 MOST IMPORTANT LEARNING APPROACH
+
+Do NOT just read files randomly.
+
+Always do:
+
+```text id="r7xq51"
+Log line
+→ search exact log statement
+→ understand surrounding code
+→ understand why it executed
+```
+
+That is how senior engineers debug systems.
+
+---
+
+# 🔥 Your BEST project navigation order
+
+Follow this EXACT order while learning:
+
+| Priority | File                   |
+| -------- | ---------------------- |
+| 1        | GatewayController      |
+| 2        | FilterChain            |
+| 3        | AuthenticationFilter   |
+| 4        | RateLimitFilter        |
+| 5        | ClientBehaviorTracker  |
+| 6        | CompositeRiskScorer    |
+| 7        | TokenBucketRateLimiter |
+| 8        | ShadowModeEvaluator    |
+| 9        | AdminController        |
+| 10       | Redis logic            |
+
+This order matches actual runtime flow.
+
+---
+
+# 🧠 MOST IMPORTANT MINDSET
+
+Do NOT think:
+
+```text id="r7xq52"
+"I am reading Java files"
+```
+
+Think:
+
+```text id="r7xq53"
+"I am tracing a live request through a distributed gateway"
+```
+
+That mindset changes everything.
